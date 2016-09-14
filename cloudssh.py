@@ -26,13 +26,21 @@ import boto3
 class CloudSSH(object):
     def __init__(self, argv):
         self.argv = argv
-        self.ec2 = boto3.resource("ec2")
         self.user = ""
         self.inst_id = ""
         self.client_tool_params = ""
         self.remote_cmd = ""
         self.ip = ""
         self.stop_on_closing = False
+        if "win" in sys.platform:
+            self.sshuicmd = "putty"
+            self.sshinlinecmd = "plink"
+        elif "linux" in sys.platform:
+            self.sshuicmd = "ssh"
+            self.sshinlinecmd = "ssh"
+        else:
+            print("unsupported platform {}".format(sys.platform))
+            exit(1)
 
     def parse_args(self):
         if "--" in self.argv:
@@ -65,14 +73,15 @@ class CloudSSH(object):
         self.inst_id = parts[1]
 
     def do_ssh(self):
+        self.ec2 = boto3.resource("ec2")
         self.locate_instance_public_ip()
-        cmd = "putty {0} {1}@{2} {3}".format(self.client_tool_params, self.user, self.ip, self.remote_cmd)
+        cmd = "{0} {1} {2}@{3} {4}".format(self.sshuicmd, self.client_tool_params, self.user, self.ip, self.remote_cmd)
         subprocess.call(cmd, shell=True)
         self.handle_session_close()
         print("cloudssh session closed")
 
     def handle_session_close(self):
-        cmd = "plink {0} {1}@{2} who".format(self.client_tool_params, self.user, self.ip)
+        cmd = "{0} {1} {2}@{3} who".format(self.sshinlinecmd, self.client_tool_params, self.user, self.ip)
         tty_sessions = subprocess.check_output(cmd)
         if len(tty_sessions) == 0:
             if self.stop_on_closing:
@@ -95,7 +104,7 @@ class CloudSSH(object):
 
                 if inst.state['Name'] == "running":
                     if inst.public_ip_address is not None:
-                        print("Obtained public IP {0} for instance {1}".format(inst.public_ip_address, self.inst_id))
+                        print("Found public IP {0} for instance {1}".format(inst.public_ip_address, self.inst_id))
                         self.ip = inst.public_ip_address
                         return
                     else:

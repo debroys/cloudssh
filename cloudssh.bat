@@ -1,2 +1,2 @@
 @echo off
-python cloudssh.py %*
+python %~dp0\cloudssh.py %*

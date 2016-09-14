@@ -1,0 +1,4 @@
+#!/bin/bash
+
+cdir=`dirname $0`
+python ${cdir}/cloudssh.py $@
