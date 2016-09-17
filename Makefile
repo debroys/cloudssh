@@ -1,11 +1,12 @@
 VERSION  := 1.0
 TGZ_FILE := cloudssh-v${VERSION}-linux.tgz
 ZIP_FILE := cloudssh-v${VERSION}-win.zip
-OBJS := cloudssh.pyc
+#OBJS := cloudssh.pyc
+OBJS := cloudssh.py
 
-%.pyc: %.py
-	@python -m compileall $<
-	@chmod +x $@
+#%.pyc: %.py
+##	@python -m compileall $<
+#	@chmod +x $@
 
 ${TGZ_FILE}: ${OBJS} cloudssh README.md LICENSE
 	@tar -czf ${TGZ_FILE} $^

@@ -19,14 +19,19 @@
 import time
 import subprocess
 import sys
+import os.path
 import shlex
 import argparse
+import getpass
 import boto3
 
 class Configuration(object):
     def __init__(self, argv):
         self.argv = argv
         self.supported_providers = ["aws"]
+        self.user_home = os.path.expanduser("~")
+        self.cloud_user = None
+        self.cloud_pwd = None
 
     def parse_args(self):
         if "--" in self.argv:
@@ -46,12 +51,14 @@ class Configuration(object):
         parser.add_argument("-n", "--no-stop", action='store_false', help="normally cloudssh would stop the instance after the session is closed"
                                                                           " if there is no other interactive sessions. This flag disables this feature.")
         parser.add_argument("-p", "--use-private-ip", action='store_true', help="use the IP address private to the cloud.")
-        parser.add_argument("cloud_address", nargs=1, type=str, metavar="<cloud address>", help="cloud ssh address. E.g. user@instance_id.")
+        parser.add_argument("-i", "--prompt-credential", action='store_true', help="require the user to enter a cloud credential interactively.")
+        parser.add_argument("cloud_address", nargs=1, type=str, metavar="<cloud address>", help="cloud ssh address. E.g. user@instance_id.region.aws.")
         parser.add_argument("remote_cmd", nargs=argparse.REMAINDER, metavar="[command]", help="command to be executed")
         args = parser.parse_args(cloudssh_params)
         dest = args.cloud_address[0]
         self.stop_on_closing = args.no_stop
         self.use_private_ip = args.use_private_ip
+        self.prompt_credential = args.prompt_credential
         self.remote_cmd = " ".join(args.remote_cmd)
         parts = dest.split("@")
         if len(parts) != 2:
@@ -65,14 +72,27 @@ class Configuration(object):
             self.provider = "aws"
 
         if self.provider == "aws":
+            print("cloud provider is AWS.")
             if len(addr_parts) > 3:
                 raise Exception("invalid aws address. The address format is <instance_id>[.<region>[.aws]]")
             if len(addr_parts) >= 2:
                 self.region = addr_parts[1]
             else:
                 self.region = None
+                if os.path.exists(os.path.join(self.user_home, '.aws/config')):
+                    print("use pre-configured region")
+                else:
+                    print("AWS region is needed.")
+                    exit(1);
+                
             if len(addr_parts) >= 1:
                 self.inst_id = addr_parts[0]
+
+            if not self.prompt_credential and os.path.exists(os.path.join(self.user_home, '.aws/credentials')):
+                print("use pre-configured credentials");
+            else:
+                self.cloud_user = getpass.getpass("enter AWS access key: ")
+                self.cloud_pwd = getpass.getpass("enter AWS secret key: ")
 
 
 class CloudSsh(object):
@@ -118,7 +138,10 @@ class AwsCloudSsh(CloudSsh):
         super(AwsCloudSsh, self).__init__(configuration)
         if self.config.region is not None:
             boto3.setup_default_session(region_name=self.config.region)
-        self.ec2 = boto3.resource("ec2")
+        if self.config.cloud_user is not None:
+            self.ec2 = boto3.Session(aws_access_key_id=self.config.cloud_user, aws_secret_access_key=self.config.cloud_pwd).resource("ec2")
+        else:
+            self.ec2 = boto3.resource("ec2")
 
     def locate_instance_public_ip(self):
         started_here = False
