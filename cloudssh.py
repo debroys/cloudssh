@@ -51,14 +51,14 @@ class Configuration(object):
         parser.add_argument("-n", "--no-stop", action='store_false', help="normally cloudssh would stop the instance after the session is closed"
                                                                           " if there is no other interactive sessions. This flag disables this feature.")
         parser.add_argument("-p", "--use-private-ip", action='store_true', help="use the IP address private to the cloud.")
-        parser.add_argument("-i", "--prompt-credential", action='store_true', help="require the user to enter a cloud credential interactively.")
+        parser.add_argument("-i", "--ask-credential", action='store_true', help="force the user to enter a cloud credential interactively. Ignore pre-configured credentials.")
         parser.add_argument("cloud_address", nargs=1, type=str, metavar="<cloud address>", help="cloud ssh address. E.g. user@instance_id.region.aws.")
         parser.add_argument("remote_cmd", nargs=argparse.REMAINDER, metavar="[command]", help="command to be executed")
         args = parser.parse_args(cloudssh_params)
         dest = args.cloud_address[0]
         self.stop_on_closing = args.no_stop
         self.use_private_ip = args.use_private_ip
-        self.prompt_credential = args.prompt_credential
+        self.ask_credential = args.ask_credential
         self.remote_cmd = " ".join(args.remote_cmd)
         parts = dest.split("@")
         if len(parts) != 2:
@@ -88,7 +88,7 @@ class Configuration(object):
             if len(addr_parts) >= 1:
                 self.inst_id = addr_parts[0]
 
-            if not self.prompt_credential and os.path.exists(os.path.join(self.user_home, '.aws/credentials')):
+            if not self.ask_credential and os.path.exists(os.path.join(self.user_home, '.aws/credentials')):
                 print("use pre-configured credentials");
             else:
                 self.cloud_user = getpass.getpass("enter AWS access key: ")
@@ -110,7 +110,7 @@ class CloudSsh(object):
 
     def do_ssh(self):
         self.ip = self.locate_instance_public_ip()
-        cmd = "{0} {1} {2}@{3} {4}".format(self.sshuicmd, self.config.client_tool_params, self.config.user, self.ip, self.config.remote_cmd)
+        cmd = "{0} {1} {2}@{3} {4}".format(self.sshuicmd if self.config.remote_cmd == "" else self.sshinlinecmd, self.config.client_tool_params, self.config.user, self.ip, self.config.remote_cmd)
         subprocess.call(cmd, shell=True)
         self.handle_session_close()
         print("cloudssh session closed")
