@@ -23,7 +23,6 @@ import os.path
 import shlex
 import argparse
 import getpass
-import boto3
 
 class Configuration(object):
     def __init__(self, argv):
@@ -45,14 +44,19 @@ class Configuration(object):
         parser = argparse.ArgumentParser(prog="cloudssh",
                                             description="A tool to ssh to cloud VM instances based on instance id.\n"
                                             "\tExample: cloudssh user@instance_id",
-                                            usage="%(prog)s [-n --no-stop] [-p --use-private-ip] <cloud address> [command] [-- <parameters passed to the client>]",
-                                            epilog="parameters after \"--\" are passed to the underline ssh client."
-                                                                                " E.g. cloudssh user@instance_id -- -i c:\\users\\xyz\\mykey.ppk")
-        parser.add_argument("-n", "--no-stop", action='store_false', help="normally cloudssh would stop the instance after the session is closed"
-                                                                          " if there is no other interactive sessions. This flag disables this feature.")
-        parser.add_argument("-p", "--use-private-ip", action='store_true', help="use the IP address private to the cloud.")
-        parser.add_argument("-i", "--ask-credential", action='store_true', help="force the user to enter a cloud credential interactively. Ignore pre-configured credentials.")
-        parser.add_argument("cloud_address", nargs=1, type=str, metavar="<cloud address>", help="cloud ssh address. E.g. user@instance_id.region.aws.")
+                                            usage="%(prog)s [-n --no-stop] [-p --use-private-ip] <cloud address> [command]"
+                                                  "[-- <parameters passed to the client>]",
+                                            epilog="parameters after \"--\" are passed directly to the underline ssh client."
+                                                   " E.g. cloudssh user@instance_id -- -i c:\\users\\xyz\\mykey.ppk")
+        parser.add_argument("-n", "--no-stop", action='store_false',
+                            help="disable the power down feature")
+        parser.add_argument("-p", "--use-private-ip", action='store_true',
+                            help="use the IP address private to the cloud")
+        parser.add_argument("-i", "--ask-credential", action='store_true',
+                            help="force the user to enter a cloud credential interactively;"
+                                 " ignore pre-configured credentials")
+        parser.add_argument("cloud_address", nargs=1, type=str, metavar="<cloud address>",
+                            help="cloud ssh address; e.g. user@instance_id.region.aws")
         parser.add_argument("remote_cmd", nargs=argparse.REMAINDER, metavar="[command]", help="command to be executed")
         args = parser.parse_args(cloudssh_params)
         dest = args.cloud_address[0]
@@ -72,7 +76,7 @@ class Configuration(object):
             self.provider = "aws"
 
         if self.provider == "aws":
-            print("cloud provider is AWS.")
+            print("Cloud provider is AWS.")
             if len(addr_parts) > 3:
                 raise Exception("invalid aws address. The address format is <instance_id>[.<region>[.aws]]")
             if len(addr_parts) >= 2:
@@ -80,7 +84,7 @@ class Configuration(object):
             else:
                 self.region = None
                 if os.path.exists(os.path.join(self.user_home, '.aws/config')):
-                    print("use pre-configured region")
+                    print("Use pre-configured region")
                 else:
                     print("AWS region is needed.")
                     exit(1);
@@ -89,7 +93,7 @@ class Configuration(object):
                 self.inst_id = addr_parts[0]
 
             if not self.ask_credential and os.path.exists(os.path.join(self.user_home, '.aws/credentials')):
-                print("use pre-configured credentials");
+                print("Use pre-configured credentials");
             else:
                 self.cloud_user = getpass.getpass("enter AWS access key: ")
                 self.cloud_pwd = getpass.getpass("enter AWS secret key: ")
@@ -105,15 +109,15 @@ class CloudSsh(object):
             self.sshuicmd = "ssh"
             self.sshinlinecmd = "ssh"
         else:
-            print("unsupported platform {}".format(sys.platform))
+            print("Unsupported platform {}".format(sys.platform))
             exit(1)
 
     def do_ssh(self):
-        self.ip = self.locate_instance_public_ip()
+        self.ip = self.locate_instance_ip()
         cmd = "{0} {1} {2}@{3} {4}".format(self.sshuicmd if self.config.remote_cmd == "" else self.sshinlinecmd, self.config.client_tool_params, self.config.user, self.ip, self.config.remote_cmd)
         subprocess.call(cmd, shell=True)
         self.handle_session_close()
-        print("cloudssh session closed")
+        print("Cloudssh session closed")
 
     def handle_session_close(self):
         cmd = "{0} {1} {2}@{3} who".format(self.sshinlinecmd, self.config.client_tool_params, self.config.user, self.ip)
@@ -127,7 +131,7 @@ class CloudSsh(object):
         else:
             print("There are other interactive sessions.")
 
-    def locate_instance_public_ip(self):
+    def locate_instance_ip(self):
         return None;
 
     def close_session(self):
@@ -136,6 +140,7 @@ class CloudSsh(object):
 class AwsCloudSsh(CloudSsh):
     def __init__(self, configuration):
         super(AwsCloudSsh, self).__init__(configuration)
+        import boto3
         if self.config.region is not None:
             boto3.setup_default_session(region_name=self.config.region)
         if self.config.cloud_user is not None:
@@ -143,7 +148,7 @@ class AwsCloudSsh(CloudSsh):
         else:
             self.ec2 = boto3.resource("ec2")
 
-    def locate_instance_public_ip(self):
+    def locate_instance_ip(self):
         started_here = False
         inst = None
         try:
@@ -162,7 +167,8 @@ class AwsCloudSsh(CloudSsh):
                             raise Exception("instance {0} does not have internal IP".format(self.config.inst_id))
                     else:
                         if inst.public_ip_address is not None:
-                            time.sleep(10)
+                            if i > 0:
+                                time.sleep(8)
                             print("Found public IP {0} for instance {1}".format(inst.public_ip_address, self.config.inst_id))
                             return inst.public_ip_address
                         else:
