@@ -102,10 +102,10 @@ class Configuration(object):
 class CloudSsh(object):
     def __init__(self, configuration):
         self.config = configuration
-        if "win" in sys.platform:
+        if "win32" == sys.platform:
             self.sshuicmd = "putty"
             self.sshinlinecmd = "plink"
-        elif "linux" in sys.platform:
+        elif "linux2" == sys.platform or "darwin" == sys.platform:
             self.sshuicmd = "ssh"
             self.sshinlinecmd = "ssh"
         else:
@@ -141,12 +141,17 @@ class AwsCloudSsh(CloudSsh):
     def __init__(self, configuration):
         super(AwsCloudSsh, self).__init__(configuration)
         import boto3
-        if self.config.region is not None:
-            boto3.setup_default_session(region_name=self.config.region)
         if self.config.cloud_user is not None:
-            self.ec2 = boto3.Session(aws_access_key_id=self.config.cloud_user, aws_secret_access_key=self.config.cloud_pwd).resource("ec2")
+            session = boto3.Session(aws_access_key_id=self.config.cloud_user, aws_secret_access_key=self.config.cloud_pwd)
+            if self.config.region is not None:
+                self.ec2 = session.resource("ec2", region_name=self.config.region)
+            else:
+                self.ec2 = session.resource("ec2")
         else:
-            self.ec2 = boto3.resource("ec2")
+            if self.config.region is not None:
+                self.ec2 = boto3.resource("ec2", region_name=self.config.region)
+            else:
+                self.ec2 = boto3.resource("ec2")
 
     def locate_instance_ip(self):
         started_here = False
