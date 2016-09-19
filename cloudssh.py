@@ -86,7 +86,7 @@ class Configuration(object):
                 if os.path.exists(os.path.join(self.user_home, '.aws/config')):
                     print("Use pre-configured region")
                 else:
-                    print("AWS region is needed.")
+                    print("AWS region is missing. Please retry with \"<instance_id>.<region_name>\"")
                     exit(1);
                 
             if len(addr_parts) >= 1:
