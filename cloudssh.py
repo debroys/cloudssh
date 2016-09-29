@@ -16,13 +16,18 @@
 #Author: Jim Yang (jim@fittedcloud.com)
 #----------------------------------------------------------------------------
 
+
+from __future__ import print_function
+
 import time
 import subprocess
 import sys
 import os.path
-import shlex
 import argparse
 import getpass
+
+import netaddr
+
 
 class Configuration(object):
     def __init__(self, argv):
@@ -31,6 +36,10 @@ class Configuration(object):
         self.user_home = os.path.expanduser("~")
         self.cloud_user = None
         self.cloud_pwd = None
+
+    def log(self, *args, **kwargs):
+        if self.verbose:
+            print(*args, **kwargs)
 
     def parse_args(self):
         if "--" in self.argv:
@@ -42,12 +51,10 @@ class Configuration(object):
             self.client_tool_params = ""
 
         parser = argparse.ArgumentParser(prog="cloudssh",
-                                            description="A tool to ssh to cloud VM instances based on instance id.\n"
-                                            "\tExample: cloudssh user@instance_id",
-                                            usage="%(prog)s [-n --no-stop] [-p --use-private-ip] <cloud address> [command]"
-                                                  "[-- <parameters passed to the client>]",
-                                            epilog="parameters after \"--\" are passed directly to the underline ssh client."
-                                                   " E.g. cloudssh user@instance_id -- -i c:\\users\\xyz\\mykey.ppk")
+                                         description=("A tool to ssh to cloud VM instances based on instance id.\n"
+                                                      "\tExample: cloudssh user@instance_id"),
+                                         epilog=("parameters after \"--\" are passed directly to the underline ssh client."
+                                                 " E.g. cloudssh user@instance_id -- -i c:\\users\\xyz\\mykey.ppk"))
         parser.add_argument("-n", "--no-stop", action='store_false',
                             help="disable the power down feature")
         parser.add_argument("-p", "--use-private-ip", action='store_true',
@@ -55,6 +62,10 @@ class Configuration(object):
         parser.add_argument("-i", "--ask-credential", action='store_true',
                             help="force the user to enter a cloud credential interactively;"
                                  " ignore pre-configured credentials")
+        parser.add_argument("-m", "--use-mosh", action='store_true',
+                            help="use mosh as SSH command (linux and darwin only)")
+        parser.add_argument("-q", "--quiet", action='store_true',
+                            help="silent mode")
         parser.add_argument("cloud_address", nargs=1, type=str, metavar="<cloud address>",
                             help="cloud ssh address; e.g. user@instance_id.region.aws")
         parser.add_argument("remote_cmd", nargs=argparse.REMAINDER, metavar="[command]", help="command to be executed")
@@ -63,7 +74,9 @@ class Configuration(object):
         self.stop_on_closing = args.no_stop
         self.use_private_ip = args.use_private_ip
         self.ask_credential = args.ask_credential
+        self.use_mosh = args.use_mosh
         self.remote_cmd = " ".join(args.remote_cmd)
+        self.verbose = not args.quiet
         parts = dest.split("@")
         if len(parts) != 2:
             print("Invalid address format.")
@@ -76,7 +89,7 @@ class Configuration(object):
             self.provider = "aws"
 
         if self.provider == "aws":
-            print("Cloud provider is AWS.")
+            self.log("Cloud provider is AWS.")
             if len(addr_parts) > 3:
                 raise Exception("invalid aws address. The address format is <instance_id>[.<region>[.aws]]")
             if len(addr_parts) >= 2:
@@ -84,29 +97,36 @@ class Configuration(object):
             else:
                 self.region = None
                 if os.path.exists(os.path.join(self.user_home, '.aws/config')):
-                    print("Use pre-configured region")
+                    self.log("Use pre-configured region")
                 else:
                     print("AWS region is missing. Please retry with \"<instance_id>.<region_name>\"")
                     exit(1);
-                
+
             if len(addr_parts) >= 1:
                 self.inst_id = addr_parts[0]
 
             if not self.ask_credential and os.path.exists(os.path.join(self.user_home, '.aws/credentials')):
-                print("Use pre-configured credentials");
+                self.log("Use pre-configured credentials");
             else:
                 self.cloud_user = getpass.getpass("enter AWS access key: ")
                 self.cloud_pwd = getpass.getpass("enter AWS secret key: ")
 
 
 class CloudSsh(object):
+    def log(self, *args, **kwargs):
+        if self.config.verbose:
+            print(*args, **kwargs)
+
     def __init__(self, configuration):
         self.config = configuration
         if "win32" == sys.platform:
             self.sshuicmd = "putty"
             self.sshinlinecmd = "plink"
         elif "linux2" == sys.platform or "darwin" == sys.platform:
-            self.sshuicmd = "ssh"
+            if self.config.use_mosh:
+                self.sshuicmd = "mosh"
+            else:
+                self.sshuicmd = "ssh"
             self.sshinlinecmd = "ssh"
         else:
             print("Unsupported platform {}".format(sys.platform))
@@ -116,8 +136,9 @@ class CloudSsh(object):
         self.ip = self.locate_instance_ip()
         cmd = "{0} {1} {2}@{3} {4}".format(self.sshuicmd if self.config.remote_cmd == "" else self.sshinlinecmd, self.config.client_tool_params, self.config.user, self.ip, self.config.remote_cmd)
         subprocess.call(cmd, shell=True)
-        self.handle_session_close()
-        print("Cloudssh session closed")
+        if self.config.verbose or self.config.stop_on_closing:
+            self.handle_session_close()
+        self.log("Cloudssh session closed")
 
     def handle_session_close(self):
         cmd = "{0} {1} {2}@{3} who".format(self.sshinlinecmd, self.config.client_tool_params, self.config.user, self.ip)
@@ -125,14 +146,14 @@ class CloudSsh(object):
         if len(tty_sessions) == 0:
             if self.config.stop_on_closing:
                 self.close_session()
-                print("No interactive sessions. Stopping the instance.")
+                self.log("No interactive sessions. Stopping the instance.")
             else:
-                print("No interactive sessions. The instance is still running.")
+                self.log("No interactive sessions. The instance is still running.")
         else:
-            print("There are other interactive sessions.")
+            self.log("There are other interactive sessions.")
 
     def locate_instance_ip(self):
-        return None;
+        return None
 
     def close_session(self):
         pass
@@ -152,6 +173,7 @@ class AwsCloudSsh(CloudSsh):
                 self.ec2 = boto3.resource("ec2", region_name=self.config.region)
             else:
                 self.ec2 = boto3.resource("ec2")
+        self._user_ip = None
 
     def locate_instance_ip(self):
         started_here = False
@@ -165,34 +187,95 @@ class AwsCloudSsh(CloudSsh):
                 if inst.state['Name'] == "running":
                     if self.config.use_private_ip:
                         if inst.private_ip_address is not None:
-                            time.sleep(10)
-                            print("Found private IP {0} for instance {1}".format(inst.private_ip_address, self.config.inst_id))
+                            self.log("Found private IP {0} for instance {1}".format(inst.private_ip_address, self.config.inst_id))
                             return inst.private_ip_address
                         else:
                             raise Exception("instance {0} does not have internal IP".format(self.config.inst_id))
                     else:
                         if inst.public_ip_address is not None:
-                            if i > 0:
-                                time.sleep(8)
-                            print("Found public IP {0} for instance {1}".format(inst.public_ip_address, self.config.inst_id))
+                            self.log("Found public IP {0} for instance {1}".format(inst.public_ip_address, self.config.inst_id))
+                            self.whitelist_user_ip(inst)
                             return inst.public_ip_address
                         else:
                             raise Exception("instance {0} does not have public IP".format(self.config.inst_id))
                 elif inst.state['Name'] == "stopped":
-                    print("Starting instance {0} from \"{1}\" state".format(self.config.inst_id, inst.state['Name']))
+                    self.log("Starting instance {0} from \"{1}\" state".format(self.config.inst_id, inst.state['Name']))
                     inst.start()
                     started_here = True
                 elif inst.state['Name'] == "pending" or inst.state['Name'] == "stopping":
-                    print("Waiting for instance {0} to start".format(self.config.inst_id))
+                    self.log("Waiting for instance {0} to start".format(self.config.inst_id))
                 else:
                     raise Exception("instance {0} is invalid ({1}).".format(self.config.inst_id, inst.state['Name']))
 
                 time.sleep(5)
             raise Exception("too many tries to locate IP. Give up.")
-        except Exception as e:
+        except Exception:
             if started_here and inst is not None:
                 inst.stop()
-            raise e
+            raise
+
+    def whitelist_user_ip(self, inst):
+        name = None
+        for tag in inst.tags:
+            if tag['Key'] == 'Name':
+                name = tag['Value']
+                break
+        sg = None
+        if name is not None:
+            for group in inst.security_groups:
+                if group['GroupName'] == name:
+                    sg = self.ec2.SecurityGroup(group['GroupId'])
+                    break
+        if sg is not None:
+            have_ssh, have_mosh = self.check_permissions(sg)
+            if not have_ssh:
+                self.add_ssh_permission(sg)
+            if self.config.use_mosh and sys.platform != 'win32' and not have_mosh:
+                self.add_mosh_permission(sg)
+
+    def check_permissions(self, sg):
+        have_ssh = False
+        have_mosh = False
+        for permission in sg.ip_permissions:
+            protocol = permission.get('IpProtocol', None)
+            ip_ranges = netaddr.IPSet([ip['CidrIp'] for ip in permission.get('IpRanges', [])])
+            if protocol in ('tcp', 'udp') and self.user_ip in ip_ranges:
+                have_ssh = have_ssh or (protocol == 'tcp' and
+                                        permission['FromPort'] <= 22 and permission['ToPort'] >= 22)
+                have_mosh = have_mosh or (protocol == 'udp' and
+                                          permission['FromPort'] <= 61000 and permission['ToPort'] >= 60000 and
+                                          permission['FromPort'] <= permission['ToPort'])
+                if have_ssh and have_mosh:
+                    break
+        return have_ssh, have_mosh
+
+    def add_mosh_permission(self, sg):
+        sg.authorize_ingress(IpProtocol='udp', FromPort=60000, ToPort=60010, CidrIp=str(self.user_ip.cidr))
+        self.log('Whitelisted mosh connections')
+
+    def add_ssh_permission(self, sg):
+        sg.authorize_ingress(IpProtocol='tcp', FromPort=22, ToPort=22, CidrIp=str(self.user_ip.cidr))
+        self.log('Whitelisted ssh connections')
+
+    @property
+    def user_ip(self):
+        ntries = 0
+        while self._user_ip is None:
+            try:
+                ip = subprocess.check_output('dig @ns1.google.com -t txt o-o.myaddr.l.google.com +short', shell=True)
+            except Exception:
+                ntries += 1
+                if ntries == 10:
+                    raise
+                continue
+            if ip and ip.strip():
+                ip = ip.strip()
+                if ip.startswith('"'):
+                    ip = ip[1:]
+                if ip.endswith('"'):
+                    ip = ip[:-1]
+                self._user_ip = netaddr.IPAddress(ip)
+        return self._user_ip
 
     def close_session(self):
         inst = self.ec2.Instance(self.config.inst_id)
@@ -206,8 +289,8 @@ def main():
         if config.provider == "aws":
             cloud_ssh = AwsCloudSsh(config)
         cloud_ssh.do_ssh()
-    except Exception as e:
-        print("Error: {0}".format(str(e)))
+    except Exception:
+        raise
 
 
 if __name__ == "__main__":
