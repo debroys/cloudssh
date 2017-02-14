@@ -19,12 +19,14 @@
 
 from __future__ import print_function
 
+import json
 import time
 import subprocess
 import sys
 import os.path
 import argparse
 import getpass
+import httplib
 
 import netaddr
 
@@ -45,10 +47,10 @@ class Configuration(object):
         if "--" in self.argv:
             dash_index = self.argv.index("--")
             cloudssh_params = self.argv[1:dash_index]
-            self.client_tool_params = " ".join(self.argv[dash_index+1:])
+            self.client_tool_params = self.argv[dash_index+1:]
         else:
             cloudssh_params = self.argv[1:]
-            self.client_tool_params = ""
+            self.client_tool_params = []
 
         parser = argparse.ArgumentParser(prog="cloudssh",
                                          description=("A tool to ssh to cloud VM instances based on instance id.\n"
@@ -75,7 +77,7 @@ class Configuration(object):
         self.use_private_ip = args.use_private_ip
         self.ask_credential = args.ask_credential
         self.use_mosh = args.use_mosh
-        self.remote_cmd = " ".join(args.remote_cmd)
+        self.remote_cmd = args.remote_cmd
         self.verbose = not args.quiet
         parts = dest.split("@")
         if len(parts) != 2:
@@ -134,15 +136,21 @@ class CloudSsh(object):
 
     def do_ssh(self):
         self.ip = self.locate_instance_ip()
-        cmd = "{0} {1} {2}@{3} {4}".format(self.sshuicmd if self.config.remote_cmd == "" else self.sshinlinecmd, self.config.client_tool_params, self.config.user, self.ip, self.config.remote_cmd)
-        subprocess.call(cmd, shell=True)
+        cmd = [self.sshinlinecmd if self.config.remote_cmd else self.sshuicmd]
+        cmd.extend(self.config.client_tool_params)
+        cmd.append("{0}@{1}".format(self.config.user, self.ip))
+        cmd.extend(self.config.remote_cmd)
+        subprocess.call(cmd)
         if self.config.verbose or self.config.stop_on_closing:
             self.handle_session_close()
         self.log("Cloudssh session closed")
 
     def handle_session_close(self):
-        cmd = "{0} {1} {2}@{3} who".format(self.sshinlinecmd, self.config.client_tool_params, self.config.user, self.ip)
-        tty_sessions = subprocess.check_output(cmd, shell=True)
+        cmd = [self.sshinlinecmd]
+        cmd.extend(self.config.client_tool_params)
+        cmd.append("{0}@{1}".format(self.config.user, self.ip))
+        cmd.append("who")
+        tty_sessions = subprocess.check_output(cmd)
         if len(tty_sessions) == 0:
             if self.config.stop_on_closing:
                 self.close_session()
@@ -202,30 +210,46 @@ class AwsCloudSsh(CloudSsh):
                     self.log("Starting instance {0} from \"{1}\" state".format(self.config.inst_id, inst.state['Name']))
                     inst.start()
                     started_here = True
-                elif inst.state['Name'] == "pending" or inst.state['Name'] == "stopping":
                     self.log("Waiting for instance {0} to start".format(self.config.inst_id))
+                    inst.wait_until_running()
+                elif inst.state['Name'] == "pending":
+                    self.log("Waiting for instance {0} to start".format(self.config.inst_id))
+                    inst.wait_until_running()
+                elif inst.state['Name'] == "stopping":
+                    self.log("Waiting for instance {0} to stop".format(self.config.inst_id))
+                    inst.wait_until_stopped()
                 else:
                     raise Exception("instance {0} is invalid ({1}).".format(self.config.inst_id, inst.state['Name']))
 
-                time.sleep(5)
             raise Exception("too many tries to locate IP. Give up.")
         except Exception:
             if started_here and inst is not None:
                 inst.stop()
             raise
 
-    def whitelist_user_ip(self, inst):
+    def get_security_group(self, inst):
         name = None
         for tag in inst.tags:
             if tag['Key'] == 'Name':
                 name = tag['Value']
                 break
-        sg = None
         if name is not None:
             for group in inst.security_groups:
                 if group['GroupName'] == name:
-                    sg = self.ec2.SecurityGroup(group['GroupId'])
-                    break
+                    return self.ec2.SecurityGroup(group['GroupId'])
+        return None
+
+    def blacklist_old_ip(self, inst):
+        sg = self.get_security_group(inst)
+        if sg is not None:
+            have_ssh, have_mosh = self.check_permissions(sg)
+            if have_ssh:
+                self.remove_ssh_permission(sg)
+            if self.config.use_mosh and sys.platform != 'win32' and not have_mosh:
+                self.remove_mosh_permission(sg)
+
+    def whitelist_user_ip(self, inst):
+        sg = self.get_security_group(inst)
         if sg is not None:
             have_ssh, have_mosh = self.check_permissions(sg)
             if not have_ssh:
@@ -251,11 +275,19 @@ class AwsCloudSsh(CloudSsh):
 
     def add_mosh_permission(self, sg):
         sg.authorize_ingress(IpProtocol='udp', FromPort=60000, ToPort=60010, CidrIp=str(self.user_ip.cidr))
-        self.log('Whitelisted mosh connections')
+        self.log('Whitelisted mosh connections from {}'.format(str(self.user_ip.cidr)))
 
     def add_ssh_permission(self, sg):
         sg.authorize_ingress(IpProtocol='tcp', FromPort=22, ToPort=22, CidrIp=str(self.user_ip.cidr))
-        self.log('Whitelisted ssh connections')
+        self.log('Whitelisted ssh connections from {}'.format(str(self.user_ip.cidr)))
+
+    def remove_mosh_permission(self, sg):
+        sg.revoke_ingress(IpProtocol='udp', FromPort=60000, ToPort=60010, CidrIp=str(self.user_ip.cidr))
+        self.log('Blacklisted mosh connections from {}'.format(str(self.user_ip.cidr)))
+
+    def remove_ssh_permission(self, sg):
+        sg.revoke_ingress(IpProtocol='tcp', FromPort=22, ToPort=22, CidrIp=str(self.user_ip.cidr))
+        self.log('Blacklisted ssh connections from {}'.format(str(self.user_ip.cidr)))
 
     @property
     def user_ip(self):
