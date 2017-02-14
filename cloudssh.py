@@ -293,20 +293,24 @@ class AwsCloudSsh(CloudSsh):
     def user_ip(self):
         ntries = 0
         while self._user_ip is None:
+            http_conn = httplib.HTTPSConnection('httpbin.org')
             try:
-                ip = subprocess.check_output('dig @ns1.google.com -t txt o-o.myaddr.l.google.com +short', shell=True)
+                http_conn.request('GET', '/ip')
+                ip = json.loads(http_conn.getresponse().read())['origin']
             except Exception:
                 ntries += 1
                 if ntries == 10:
                     raise
                 continue
+            finally:
+                http_conn.close()
             if ip and ip.strip():
                 ip = ip.strip()
                 if ip.startswith('"'):
                     ip = ip[1:]
                 if ip.endswith('"'):
                     ip = ip[:-1]
-                self._user_ip = netaddr.IPAddress(ip)
+                self._user_ip = netaddr.IPNetwork(ip)
         return self._user_ip
 
     def close_session(self):
