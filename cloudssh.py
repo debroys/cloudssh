@@ -181,7 +181,6 @@ class AwsCloudSsh(CloudSsh):
                 self.ec2 = boto3.resource("ec2", region_name=self.config.region)
             else:
                 self.ec2 = boto3.resource("ec2")
-        self._user_ip = None
 
     def locate_instance_ip(self):
         started_here = False
@@ -202,7 +201,6 @@ class AwsCloudSsh(CloudSsh):
                     else:
                         if inst.public_ip_address is not None:
                             self.log("Found public IP {0} for instance {1}".format(inst.public_ip_address, self.config.inst_id))
-                            self.whitelist_user_ip(inst)
                             return inst.public_ip_address
                         else:
                             raise Exception("instance {0} does not have public IP".format(self.config.inst_id))
@@ -226,92 +224,6 @@ class AwsCloudSsh(CloudSsh):
             if started_here and inst is not None:
                 inst.stop()
             raise
-
-    def get_security_group(self, inst):
-        name = None
-        for tag in inst.tags:
-            if tag['Key'] == 'Name':
-                name = tag['Value']
-                break
-        if name is not None:
-            for group in inst.security_groups:
-                if group['GroupName'] == name:
-                    return self.ec2.SecurityGroup(group['GroupId'])
-        return None
-
-    def blacklist_old_ip(self, inst):
-        sg = self.get_security_group(inst)
-        if sg is not None:
-            have_ssh, have_mosh = self.check_permissions(sg)
-            if have_ssh:
-                self.remove_ssh_permission(sg)
-            if self.config.use_mosh and sys.platform != 'win32' and not have_mosh:
-                self.remove_mosh_permission(sg)
-
-    def whitelist_user_ip(self, inst):
-        sg = self.get_security_group(inst)
-        if sg is not None:
-            have_ssh, have_mosh = self.check_permissions(sg)
-            if not have_ssh:
-                self.add_ssh_permission(sg)
-            if self.config.use_mosh and sys.platform != 'win32' and not have_mosh:
-                self.add_mosh_permission(sg)
-
-    def check_permissions(self, sg):
-        have_ssh = False
-        have_mosh = False
-        for permission in sg.ip_permissions:
-            protocol = permission.get('IpProtocol', None)
-            ip_ranges = netaddr.IPSet([ip['CidrIp'] for ip in permission.get('IpRanges', [])])
-            if protocol in ('tcp', 'udp') and self.user_ip in ip_ranges:
-                have_ssh = have_ssh or (protocol == 'tcp' and
-                                        permission['FromPort'] <= 22 and permission['ToPort'] >= 22)
-                have_mosh = have_mosh or (protocol == 'udp' and
-                                          permission['FromPort'] <= 61000 and permission['ToPort'] >= 60000 and
-                                          permission['FromPort'] <= permission['ToPort'])
-                if have_ssh and have_mosh:
-                    break
-        return have_ssh, have_mosh
-
-    def add_mosh_permission(self, sg):
-        sg.authorize_ingress(IpProtocol='udp', FromPort=60000, ToPort=60010, CidrIp=str(self.user_ip.cidr))
-        self.log('Whitelisted mosh connections from {}'.format(str(self.user_ip.cidr)))
-
-    def add_ssh_permission(self, sg):
-        sg.authorize_ingress(IpProtocol='tcp', FromPort=22, ToPort=22, CidrIp=str(self.user_ip.cidr))
-        self.log('Whitelisted ssh connections from {}'.format(str(self.user_ip.cidr)))
-
-    def remove_mosh_permission(self, sg):
-        sg.revoke_ingress(IpProtocol='udp', FromPort=60000, ToPort=60010, CidrIp=str(self.user_ip.cidr))
-        self.log('Blacklisted mosh connections from {}'.format(str(self.user_ip.cidr)))
-
-    def remove_ssh_permission(self, sg):
-        sg.revoke_ingress(IpProtocol='tcp', FromPort=22, ToPort=22, CidrIp=str(self.user_ip.cidr))
-        self.log('Blacklisted ssh connections from {}'.format(str(self.user_ip.cidr)))
-
-    @property
-    def user_ip(self):
-        ntries = 0
-        while self._user_ip is None:
-            http_conn = httplib.HTTPSConnection('httpbin.org')
-            try:
-                http_conn.request('GET', '/ip')
-                ip = json.loads(http_conn.getresponse().read())['origin']
-            except Exception:
-                ntries += 1
-                if ntries == 10:
-                    raise
-                continue
-            finally:
-                http_conn.close()
-            if ip and ip.strip():
-                ip = ip.strip()
-                if ip.startswith('"'):
-                    ip = ip[1:]
-                if ip.endswith('"'):
-                    ip = ip[:-1]
-                self._user_ip = netaddr.IPNetwork(ip)
-        return self._user_ip
 
     def close_session(self):
         inst = self.ec2.Instance(self.config.inst_id)
