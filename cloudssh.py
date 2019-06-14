@@ -61,6 +61,8 @@ class Configuration(object):
                                  " ignore pre-configured credentials")
         parser.add_argument("-m", "--use-mosh", action='store_true',
                             help="use mosh as SSH command (linux and darwin only)")
+        parser.add_argument("-s", "--start-only", action='store_true',
+                            help="only ensure the instance is running, do not connect.")
         parser.add_argument("-q", "--quiet", action='store_true',
                             help="silent mode")
         parser.add_argument("cloud_address", nargs=1, type=str, metavar="<cloud address>",
@@ -72,6 +74,7 @@ class Configuration(object):
         self.use_private_ip = args.use_private_ip
         self.ask_credential = args.ask_credential
         self.use_mosh = args.use_mosh
+        self.start_only = args.start_only
         self.remote_cmd = args.remote_cmd
         self.verbose = not args.quiet
         parts = dest.split("@")
@@ -131,6 +134,8 @@ class CloudSsh(object):
 
     def do_ssh(self):
         self.ip = self.locate_instance_ip()
+        if self.config.start_only:
+            return
         cmd = [self.sshinlinecmd if self.config.remote_cmd else self.sshuicmd]
         cmd.extend(self.config.client_tool_params)
         cmd.append("{0}@{1}".format(self.config.user, self.ip))
@@ -178,62 +183,71 @@ class AwsCloudSsh(CloudSsh):
                 self.ec2 = boto3.resource("ec2", region_name=self.config.region)
             else:
                 self.ec2 = boto3.resource("ec2")
+        self.started_here = False
+
+    def get_running_instance(self):
+        inst = self.ec2.Instance(self.config.inst_id)
+        if inst is None:
+            raise Exception("invalid instance id {0}".format(self.config.inst_id))
+
+        self.started_here = False
+        while inst.state['Name'] != "running":
+            if inst.state['Name'] == "stopped":
+                self.log("Starting instance {0} from \"{1}\" state".format(self.config.inst_id,
+                                                                           inst.state['Name']))
+                inst.start()
+                self.started_here = True
+                self.log("Waiting for instance {0} to start".format(self.config.inst_id))
+                inst.wait_until_running()
+            elif inst.state['Name'] == "pending":
+                self.log("Waiting for instance {0} to start".format(self.config.inst_id))
+                inst.wait_until_running()
+            elif inst.state['Name'] == "stopping":
+                self.log("Waiting for instance {0} to stop".format(self.config.inst_id))
+                inst.wait_until_stopped()
+            else:
+                raise Exception("instance {0} is invalid ({1}).".format(self.config.inst_id, inst.state['Name']))
+            inst = self.ec2.Instance(self.config.inst_id)
+        return inst
+
+    def get_ip_address(self, inst):
+        if self.config.use_private_ip:
+            if inst.private_ip_address is None:
+                raise Exception("instance {0} does not have internal IP".format(self.config.inst_id))
+            self.log("Found private IP {0} for instance {1}".format(inst.private_ip_address,
+                                                                    self.config.inst_id))
+            return inst.private_ip_address
+        elif inst.public_ip_address is None:
+            raise Exception("instance {0} does not have public IP".format(self.config.inst_id))
+        self.log("Found public IP {0} for instance {1}".format(inst.public_ip_address,
+                                                               self.config.inst_id))
+        return inst.public_ip_address
 
     def locate_instance_ip(self):
-        started_here = False
         inst = None
         try:
-            inst = self.ec2.Instance(self.config.inst_id)
-            if inst is None:
-                raise Exception("invalid instance id {0}".format(self.config.inst_id))
-
-            while inst.state['Name'] != "running":
-                if inst.state['Name'] == "stopped":
-                    self.log("Starting instance {0} from \"{1}\" state".format(self.config.inst_id,
-                                                                               inst.state['Name']))
-                    inst.start()
-                    started_here = True
-                    self.log("Waiting for instance {0} to start".format(self.config.inst_id))
-                    inst.wait_until_running()
-                elif inst.state['Name'] == "pending":
-                    self.log("Waiting for instance {0} to start".format(self.config.inst_id))
-                    inst.wait_until_running()
-                elif inst.state['Name'] == "stopping":
-                    self.log("Waiting for instance {0} to stop".format(self.config.inst_id))
-                    inst.wait_until_stopped()
-                else:
-                    raise Exception("instance {0} is invalid ({1}).".format(self.config.inst_id, inst.state['Name']))
-                inst = self.ec2.Instance(self.config.inst_id)
-            ip_address = None
-            if self.config.use_private_ip:
-                if inst.private_ip_address is not None:
-                    self.log("Found private IP {0} for instance {1}".format(inst.private_ip_address,
-                                                                            self.config.inst_id))
-                    ip_address = inst.private_ip_address
-                else:
-                    raise Exception("instance {0} does not have internal IP".format(self.config.inst_id))
-            else:
-                if inst.public_ip_address is not None:
-                    self.log("Found public IP {0} for instance {1}".format(inst.public_ip_address,
-                                                                           self.config.inst_id))
-                    ip_address = inst.public_ip_address
-                else:
-                    raise Exception("instance {0} does not have public IP".format(self.config.inst_id))
-            self.log('Waiting for SSH connection to {}'.format(ip_address))
-            try:
-                s = socket.create_connection((ip_address, 22), 300)
-                s.close()
-            except socket.error:
+            inst = self.get_running_instance()
+            ip_address = self.get_ip_address(inst)
+            if not have_ssh_prompt(ip_address):
                 self.log("WARNING: SSH connection not available for {}".format(ip_address))
             return ip_address
         except Exception:
-            if started_here and inst is not None:
+            if self.started_here and inst is not None:
                 inst.stop()
             raise
 
     def close_session(self):
         inst = self.ec2.Instance(self.config.inst_id)
         inst.stop()
+
+
+def have_ssh_prompt(ip_address):
+    try:
+        sock = socket.create_connection((ip_address, 22), 300)
+        sock.close()
+        return True
+    except socket.error:
+        return False
 
 
 def main():
