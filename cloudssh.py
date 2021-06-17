@@ -16,7 +16,9 @@
 
 
 from __future__ import print_function
+from __future__ import unicode_literals
 
+from builtins import object
 import subprocess
 import sys
 import os.path
@@ -122,7 +124,7 @@ class CloudSsh(object):
         if "win32" == sys.platform:
             self.sshuicmd = "putty"
             self.sshinlinecmd = "plink"
-        elif "linux2" == sys.platform or "darwin" == sys.platform:
+        elif "linux" == sys.platform or "linux2" == sys.platform or "darwin" == sys.platform:
             if self.config.use_mosh:
                 self.sshuicmd = "mosh"
             else:

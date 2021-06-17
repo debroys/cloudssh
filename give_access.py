@@ -1,7 +1,12 @@
 #! /usr/bin/env python
 
+from __future__ import unicode_literals
+from future import standard_library
+standard_library.install_aliases()
+from builtins import str
+from past.builtins import basestring
 import argparse
-import httplib
+import http.client
 import json
 import sys
 
@@ -32,12 +37,12 @@ def ssh_port_ranges():
 def get_user_ip(ip_address_url):
     if ip_address_url.startswith('http://'):
         ip_address_url = ip_address_url.split('//', 1)[1]
-        cls = httplib.HTTPConnection
+        cls = http.client.HTTPConnection
     elif ip_address_url.startswith('https://'):
         ip_address_url = ip_address_url.split('//', 1)[1]
-        cls = httplib.HTTPSConnection
+        cls = http.client.HTTPSConnection
     else:
-        cls = httplib.HTTPSConnection
+        cls = http.client.HTTPSConnection
     if '/' in ip_address_url:
         url_root, url_path = ip_address_url.split('/', 1)
     else:
@@ -61,12 +66,12 @@ def get_user_ip(ip_address_url):
             return None
     else:
         ip = response.read().strip()
-    if ip.startswith('"'):
+    if ip.startswith(b'"'):
         ip = ip[1:]
-    if ip.endswith('"'):
+    if ip.endswith(b'"'):
         ip = ip[:-1]
     if ip:
-        return netaddr.IPNetwork(ip)
+        return netaddr.IPNetwork(ip.decode('ascii'))
     return None
 
 
@@ -91,7 +96,7 @@ def whitelist_user_ip(user_ip, sg_ssh, sg_rds):
     for sg, port_ranges in tasks:
         if sg.ip_permissions:
             sg.revoke_ingress(IpPermissions=sg.ip_permissions)
-        for protocol, port_range in port_ranges.iteritems():
+        for protocol, port_range in list(port_ranges.items()):
             sg.authorize_ingress(IpProtocol=protocol, FromPort=port_range[0], ToPort=port_range[1],
                                  CidrIp=str(user_ip.cidr))
 
